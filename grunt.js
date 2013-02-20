@@ -2,7 +2,7 @@ var fs = require('fs');
 var markdown = require('node-markdown').Markdown;
 
 module.exports = function(grunt) {
-
+  
   // Project configuration.
   grunt.initConfig({
     ngversion: '1.0.4',
@@ -267,6 +267,139 @@ module.exports = function(grunt) {
     var options = ['--no-single-run', '--auto-watch'].concat(this.args);
     runTestacular('start', options);
   });
-  
+
+  var packageVersion;
+
+  grunt.registerTask('before-release-build', 'Make sure version is clean of snapshot', function() {
+    packageVersion = new PackageVersion('package.json');
+    //Bump version in package.json (rename from *[0-9].[0-9].[0-9]-SNAPSHOT to *[0-9].[0-9].[0-9])
+    packageVersion.save(false);
+  });
+
+  grunt.registerTask('after-release-build', 'Releases the build', function() {
+
+    var done = grunt.task.current.async();
+
+    function releaseCommitTagPush() {
+      //Commit the version change with the following message: chore(release): [versio number]
+      runGit(['commit', '-a', '-m', 'chore(release): ' + packageVersion.prettyVersion()], done).on('exit', function() {
+        //tag (git tag [version number])
+        runGit(['tag', packageVersion.prettyVersion()], done).on('exit', function() {
+          //push changes (git push --tags)
+          runGit(['push', '--tags'], done).on('exit', function() {
+            runGit(['push'], done).on('exit', function() {
+              //switch to gh-pages (git checkout gh-pages)
+              runGit(['checkout', 'gh-pages'], done).on('exit', function() {
+                releaseCopyDist();
+              });
+            });
+          });
+        });
+      });
+    }
+
+    //Copy dist to main folder
+    function releaseCopyDist() {
+      grunt.file.expand('dist/**/*.*').forEach(function(path) {
+        grunt.file.copy(path, path.replace('dist/',''));
+      });
+      releaseVersionChangeGhPages();
+    }
+
+    //Commit version changes to gh-pages
+    function releaseVersionChangeGhPages() {
+      //Commit the version change with the following message: chore(release): [versio number]
+      runGit(['add', '-A'], done).on('exit', function() {
+        runGit(['commit', '-m', 'chore(release): ' + packageVersion.prettyVersion()], done).on('exit', function() {
+          //push changes 
+          runGit(['push'], done).on('exit', function() {
+            //switch to gh-pages (git checkout gh-pages)
+            runGit(['checkout', 'master'], done).on('exit', function() {
+              releaseBumpFinalize();
+            });
+          });
+        });
+      });
+    }
+
+    //Bump version and commit starting
+    function releaseBumpFinalize() {
+      packageVersion.incrementBuild();
+      packageVersion.save(true);
+      runGit(['commit', '-a', '-m', 'chore(release): starting ' + packageVersion.prettyVersion()], done).on('exit', function() {
+        //push changes 
+        runGit(['push'], done).on('exit', function() {
+          done();
+        });
+      });
+    }
+
+    //Start async task chain
+    releaseCommitTagPush();
+
+  });
+
+  //release-commit-tag-push release-copy-dist release-versionchange-gh release-bumpfinalize
+  grunt.registerTask('release', 'before-release-build default after-release-build');
+
+  function runGit(options, done) {
+    var gitCmd = 'git';
+    var args = options;
+    grunt.log.ok('Do git ' + args.join(' '));
+    var child = grunt.utils.spawn({
+        cmd: gitCmd,
+        args: args
+    }, function(err, result, code) {
+      if (code) {
+        grunt.fatal(code + ':' + result);
+        done(false);
+      }
+    });
+    child.stdout.pipe(process.stdout);
+    child.stderr.pipe(process.stderr);
+    return child;
+  }
+
+  function PackageVersion(sourceFileName){
+    this.sourceFile = sourceFileName;
+    this.versionPackage = grunt.file.readJSON(this.sourceFile);
+
+    var versionMatcher = new RegExp('(\\d{1,3}).(\\d{1,3}).(\\d{1,3})*');
+    var versionResult = versionMatcher.exec(this.versionPackage.version);
+    if (versionResult.length != 4) {
+      grunt.warn('Error parsing version number');
+    }
+    this.currentCleanVersion = { major: 0, minor: 0, build: 0};
+    this.currentCleanVersion.major = versionResult[1];
+    this.currentCleanVersion.minor = versionResult[2];
+    this.currentCleanVersion.build = versionResult[3];
+  }
+
+  PackageVersion.prototype.incrementMajor = function(){
+    this.currentCleanVersion.major++;
+    this.currentCleanVersion.minor = 0;
+    this.currentCleanVersion.build = 0;
+  };
+  PackageVersion.prototype.incrementMinor = function(){
+    this.currentCleanVersion.minor++;
+    this.currentCleanVersion.build = 0;
+  };
+  PackageVersion.prototype.incrementBuild = function(){
+    this.currentCleanVersion.build++;
+  };  
+  PackageVersion.prototype.prettyVersion = function() {
+    return this.currentCleanVersion.major + '.' +
+      this.currentCleanVersion.minor + '.' +
+      this.currentCleanVersion.build;
+  };
+  PackageVersion.prototype.save = function(withSnapshot){
+    this.versionPackage.version = this.prettyVersion();
+    if (withSnapshot) {
+      this.versionPackage.version += '-SNAPSHOT';
+    }
+    grunt.file.write(this.sourceFile, JSON.stringify(this.versionPackage, null, 2) + '\n');
+    grunt.config.set('pkg', this.versionPackage);
+  };
+
   return grunt;
 };
